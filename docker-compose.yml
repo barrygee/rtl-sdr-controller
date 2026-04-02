@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  rtl-tcp:
+    build: .
+    container_name: rtl-tcp
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+    ports:
+      - "1234:1234"
