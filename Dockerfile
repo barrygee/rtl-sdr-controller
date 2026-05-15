@@ -13,6 +13,6 @@ RUN git clone https://github.com/steve-m/librtlsdr.git && \
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
-EXPOSE 1234
+EXPOSE 4321
 
-CMD ["rtl_tcp", "-a", "0.0.0.0", "-p", "1234"]
+CMD ["rtl_tcp", "-a", "0.0.0.0", "-p", "4321", "-n", "50"]
