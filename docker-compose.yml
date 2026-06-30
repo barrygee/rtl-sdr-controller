@@ -6,17 +6,21 @@ services:
     container_name: rtl-tcp
     restart: unless-stopped
     privileged: true
-    volumes:
+    # Pass the WHOLE USB bus as devices (not a volume bind-mount). A volume
+    # mount snapshots /dev/bus/usb at container start; when the SDR
+    # re-enumerates (device 3 -> 4, confirmed in dmesg) the node path
+    # changes, the bind-mounted view goes stale, libusb's handle breaks and
+    # rtl_tcp crash-loops with "Failed to submit transfer 0". The devices +
+    # cgroup-rule form tracks the bus so a re-enumerated node stays usable.
+    devices:
       - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - 'c 189:* rmw'          # 189 = USB char-major; whole bus, not one node
     ports:
       - "4321:4321"
     command: ["rtl_tcp", "-a", "0.0.0.0", "-p", "4321", "-n", "50"]
     healthcheck:
-      # rtl_tcp can print "Failed to submit transfer 0 / Signal caught,
-      # exiting!" after the SDR re-enumerates yet stay wedged without
-      # exiting, so restart:unless-stopped never fires. Probing the TCP
-      # port detects the wedged state and lets Docker cycle the container.
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/4321' || exit 1"]
+      test: ["CMD-SHELL", "pgrep -x rtl_tcp >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
