@@ -25,9 +25,31 @@ USB dongle → rtl-tcp (127.0.0.1:1235, loopback-only) → rtl-relay (0.0.0.0:12
 ```
 
 - **`rtl-tcp`** binds **loopback-only** on an internal port (`1235`), so it's reachable only on the host, not the LAN.
-- **`rtl-relay`** is the dongle's single permanent client. It re-serves the IQ stream to **any number of clients** on the public port (`1234`): replays the `rtl_tcp` magic header, fans out IQ, forwards tuning commands upstream (one physical tuner, so concurrent clients share tuning), and **reaps dead clients** via TCP keepalive. A watchdog restarts `rtl-tcp` (via the Docker socket) if the dongle ever wedges silently after a USB re-enumeration.
+- **`rtl-relay`** is the dongle's single permanent client. It re-serves the IQ stream to **any number of clients** on the public port (`1234`): replays the `rtl_tcp` magic header, fans out IQ, and **reaps dead clients** via TCP keepalive. A watchdog restarts `rtl-tcp` (via the Docker socket) if the dongle ever wedges silently after a USB re-enumeration.
 
 Clients still connect to the host on port **1234**, exactly as a plain `rtl_tcp` — the relay is transparent.
+
+### Tuning ownership (control channel)
+
+There is one physical tuner, so simultaneous clients can't each tune freely. The relay exposes a second port — the **control channel** (`1236` = `1234 + 2` by default, `RELAY_CONTROL_PORT`) — speaking **newline-delimited JSON** to coordinate a single tuning **owner**:
+
+```
+{"op":"claim"}    → become the tuning owner (only if no one currently owns it)
+{"op":"release"}  → give up ownership
+{"op":"set", "center_hz":…, "sample_rate":…, "gain_db":…, "gain_auto":…}
+                  → honoured only from the owner; the relay applies it to the dongle
+{"op":"get"}      → request the current state
+```
+
+The relay replies (and pushes unsolicited on connect and on every change):
+
+```
+{"event":"state", "owner":<bool>, "center_hz":…, "sample_rate":…, "gain_db":…, "gain_auto":…}
+```
+
+`owner` tells **that** client whether it holds the token. While a token is held the relay is the **sole writer of commands to the dongle**, so non-owners are **read-only followers** that always see the real, live tuning instead of a stale guess. The token frees on `release` or when the owner's control connection drops. **With no token held**, the relay falls back to forwarding raw 5-byte commands on the IQ sockets last-writer-wins — so SDR#/GQRX/SDR++ and other direct `rtl_tcp` clients still tune normally.
+
+This is what lets two Sentinel instances share one dongle without silently fighting: one owns tuning, the others follow.
 
 ---
 
@@ -113,7 +135,7 @@ Expected output — `rtl-tcp` finds the dongle, and `rtl-relay` reports it conne
 rtl-tcp   | Found 1 device(s):
 rtl-tcp   |   0:  Realtek, RTL2838UHIDIR, SN: ...
 rtl-tcp   | Using device 0: Generic RTL2832U OEM
-rtl-relay | Relay listening on 0.0.0.0:1234, fanning out 127.0.0.1:1235
+rtl-relay | Relay listening on 0.0.0.0:1234 (control 0.0.0.0:1236), fanning out 127.0.0.1:1235
 rtl-relay | Upstream rtl_tcp connected (127.0.0.1:1235)
 ```
 
@@ -134,7 +156,7 @@ Port: 1234
 
 **SDR++:** Source → RTL-SDR TCP → set host and port
 
-Multiple clients can connect at once; they share the dongle's tuning.
+Multiple clients can connect at once. Direct `rtl_tcp` clients (SDR#/GQRX/SDR++) share the dongle's tuning last-writer-wins; Sentinel instances coordinate a single owner over the control channel (see [Tuning ownership](#tuning-ownership-control-channel)).
 
 ---
 
@@ -152,7 +174,8 @@ hostname -I                       # find the host's IP address
 
 ## Notes
 
-- Port **`1234`** is the public port clients connect to — served by the relay.
+- Port **`1234`** is the public IQ port clients connect to — served by the relay.
+- Port **`1236`** is the relay's tuning-ownership control channel (`RELAY_CONTROL_PORT`, defaults to `1234 + 2`).
 - Port **`1235`** is the internal, loopback-only `rtl_tcp` port behind the relay (not exposed to the LAN).
 - The relay mounts `/var/run/docker.sock` so its watchdog can restart `rtl-tcp` on a silent-dongle wedge. This grants the relay container root-equivalent host control — fine on a single-purpose device; remove the mount and `RELAY_RESTART_CONTAINER` env in `docker-compose.yml` to disable the watchdog.
 - `privileged: true` + the USB-bus device passthrough are required so a re-enumerated dongle stays usable.
