@@ -6,6 +6,11 @@ services:
     container_name: rtl-tcp
     restart: unless-stopped
     privileged: true
+    # Host networking + a LOOPBACK-only bind keeps the dongle off the LAN: only
+    # the relay (also host-networked) reaches 127.0.0.1:1235, and every LAN
+    # consumer goes through the relay on :1234. Host networking also sidesteps
+    # the bridge/NAT DNAT path that proved unreliable when publishing directly.
+    network_mode: host
     # Pass the WHOLE USB bus as devices (not a volume bind-mount). A volume
     # mount snapshots /dev/bus/usb at container start; when the SDR
     # re-enumerates (device 3 -> 4, confirmed in dmesg) the node path
@@ -16,12 +21,46 @@ services:
       - /dev/bus/usb:/dev/bus/usb
     device_cgroup_rules:
       - 'c 189:* rmw'          # 189 = USB char-major; whole bus, not one node
-    ports:
-      - "4321:4321"
-    command: ["rtl_tcp", "-a", "0.0.0.0", "-p", "4321", "-n", "50"]
+    command: ["rtl_tcp", "-a", "127.0.0.1", "-p", "1235", "-n", "50"]
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x rtl_tcp >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Fan-out relay: the dongle's single permanent client, re-serving its IQ to
+  # any number of consumers (e.g. multiple Sentinels) on :1234. rtl_tcp serves
+  # one client with no keepalive, so a consumer that dies abruptly used to leave
+  # a dead connection holding the dongle forever; the relay holds the one slot
+  # and reaps dead clients itself, so that lock-up can't happen.
+  rtl-relay:
+    image: python:3.12-slim
+    container_name: rtl-relay
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - rtl-tcp
+    volumes:
+      - ./rtl_tcp_relay.py:/app/rtl_tcp_relay.py:ro
+      # Read-only Docker socket so the watchdog can restart rtl-tcp if the
+      # dongle wedges-but-stays-alive. NOTE: socket access is effectively root
+      # on the host — acceptable on a single-purpose Pi; drop this mount (and
+      # RELAY_RESTART_CONTAINER) to disable the watchdog.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      RELAY_UPSTREAM_HOST: "127.0.0.1"
+      RELAY_UPSTREAM_PORT: "1235"
+      RELAY_LISTEN_HOST: "0.0.0.0"
+      RELAY_LISTEN_PORT: "1234"
+      RELAY_RESTART_CONTAINER: "rtl-tcp"
+      RELAY_RESTART_AFTER_FAILURES: "3"
+      RELAY_RESTART_COOLDOWN_S: "60"
+    command: ["python", "-u", "/app/rtl_tcp_relay.py"]
+    healthcheck:
+      # The relay is multi-client, so a probe never starves a real consumer.
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/1234' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
