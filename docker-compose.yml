@@ -53,6 +53,10 @@ services:
       RELAY_UPSTREAM_PORT: "1235"
       RELAY_LISTEN_HOST: "0.0.0.0"
       RELAY_LISTEN_PORT: "1234"
+      # NDJSON tuning-ownership control channel (claim/release/set/get + state
+      # push). Sentinels coordinate a single tuning owner here; read-only
+      # followers track the owner's tuning live. Defaults to LISTEN_PORT + 2.
+      RELAY_CONTROL_PORT: "1236"
       RELAY_RESTART_CONTAINER: "rtl-tcp"
       RELAY_RESTART_AFTER_FAILURES: "3"
       RELAY_RESTART_COOLDOWN_S: "60"
